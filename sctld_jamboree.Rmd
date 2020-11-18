@@ -1,0 +1,137 @@
+---
+title: "sctld_jamboree"
+author: "Allyson DeMerlis"
+date: "11/16/2020"
+output: html_document
+---
+
+Install and Load Packages
+```{r}
+#install.packages("BiocManager")
+#BiocManager::install("DESeq2")
+# BiocManager::install("tximport")
+#BiocManager::install("ComplexHeatmap")
+# BiocManager::install("DEGreport")
+# BiocManager::install("limma")
+# BiocManager::install("edgeR")
+# BiocManager::install("pheatmap")
+
+#browseVignettes("DESeq2")
+
+library(tidyverse)
+library(DESeq2)
+library(tximport)
+library(DESeq2)
+library(tidyverse)
+library(tximport)
+library(Cairo)
+library(ComplexHeatmap)
+library(DEGreport)
+library(limma)
+library(edgeR)
+library(pheatmap)
+```
+
+#import metadata
+```{r}
+metadata <- read.csv("metadata.csv", header = TRUE)
+
+#making the metadata file for the sample and treatment information
+meta=data.frame(sample = colnames(countdata),
+                condition = stringr::str_detect(pattern = "control",string = colnames(countdata))
+                )
+
+#changing TRUE and FALSE for condition to Control and Wounded
+meta$condition[str_detect(meta$condition,"TRUE")] <- "Control"
+meta$condition[str_detect(meta$condition,"FALSE")] <- "Diseased"
+
+meta<-meta %>% column_to_rownames("sample")
+# 
+# meta$condition <- as.factor(meta$condition)
+# 
+# rownames(meta) <- gsub("control", "", rownames(meta))
+
+ncol(countdata_matrix) == nrow(meta)
+
+```
+
+
+## Import counts data 
+```{r}
+countdata <- read.delim("gene.counts.deuniqued", row.names = 1, skip = 1) # comment.char="#"
+```
+
+#editing column names
+```{r}
+  colnames(countdata) <- gsub("Aligned.sortedByCoord.out.bamunique.bam", "", colnames(countdata))
+  colnames(countdata) <- gsub("Ofav_na_", "", colnames(countdata))
+  colnames(countdata) <- gsub("_", "", colnames(countdata))
+  colnames(countdata) <- gsub("na", "", colnames(countdata))
+ countdata <- countdata %>% select(!K55D4controlAligned.sortedByCoord.out.unique.bamunique.bam)
+ countdata %>%select(!Chr:Length) -> countdata
+ 
+ #Remove first six columns (Geneid, chr, start, end, strand, length)
+ #countdata <- countdata[ ,7:ncol(countdata)]
+ #countdata <- countdata[ ,-4]
+ # Remove file prefixes and suffixes
+ #ksamples <- colnames(countdata) %>% str_extract("K[0-9]{2}")
+ #colnames(countdata) <- ksamples
+ #filter(`Working Label` %in% colnames(countdata))
+```
+
+#subset data
+```{r}
+countdata_control <- select(countdata, matches("*control"))
+countdata_diseased <- select(countdata, !matches("*control"))
+```
+
+#create DESeq object
+```{r}
+countdata_matrix <- as.matrix(countdata)
+
+dds <- DESeqDataSetFromMatrix(countData=countdata_matrix, colData=meta, design= ~condition)
+```
+
+```{r}
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+dds <- DESeq(dds)
+
+plotDispEsts(dds)
+plotMA(results(dds), ylim = c(-10, 10))
+
+resultsNames(dds)
+
+res <- lfcShrink(dds, coef="condition_Diseased_vs_Control", type="norm")
+sum(res$padj < 0.1, na.rm=TRUE)
+#1750 significant diff
+
+res05 <- results(dds, alpha=0.05)
+summary(res05)
+sum(res05$padj < 0.05, na.rm = TRUE)
+#1169 significant diff
+
+normalized_counts <- counts(dds, normalized=TRUE)
+write.table(normalized_counts, file="normalized_counts.txt", sep="\t", quote=F, col.names=NA)
+```
+
+#PCA
+```{r}
+dds_vst<- vst(dds,blind=FALSE)
+plotPCA(dds_vst)
+```
+
+```{r}
+pca12 <- plotPCA(dds_vst,intgroup=c("condition"),returnData = TRUE)
+ggplot(pca12, aes(PC1, PC2,shape=condition,color=condition)) + 
+  geom_point(size=3) +  xlab(paste0("PC1 45% variance")) + 
+  ylab(paste0("PC2 11% variance")) + 
+  theme(legend.position="right")  + 
+  theme(text = element_text(size=10))  + 
+  theme(legend.key.size = unit(0.5, "cm")) + 
+  geom_point(size = 3) +
+  theme_classic() + 
+  stat_ellipse(aes(PC1, PC2, group=condition), type = "norm")
+```
+
