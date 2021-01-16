@@ -1,0 +1,498 @@
+---
+title: "Mote_subset"
+author: "Allyson DeMerlis"
+date: "1/6/2021"
+output: html_document
+---
+Install and Load Packages
+```{r}
+library(tidyverse)
+library(DESeq2)
+library(ggrepel)
+library(apeglm)
+library(EnhancedVolcano)
+library(ComplexHeatmap)
+library(pheatmap)
+library(genefilter)
+library(WGCNA)
+library(flashClust)
+library(edgeR) #counts per million
+```
+
+Import counts data for orbicella faveolata from feature counts (removed low read depth samples and kept only Mote samples)
+```{r}
+countdata <- read.delim("ofav_counts", row.names = 1, skip = 1)
+
+# Project Species Status n
+# Mote	Ofav	control	  19	
+# Mote	Ofav	exposed	  19	
+# Smithsonian	Ofav	control	3	
+# Smithsonian	Ofav	exposed	6	
+
+#reformatting the counts file for use
+colnames(countdata) <- gsub("X.scratch.projects.transcriptomics.mikeconnelly.projects.sctld_jamboree.tagseq.outputs.alignments.Ofav_na_", "", colnames(countdata))
+colnames(countdata) <- gsub("_na_Aligned.sortedByCoord.out.uniq.bam", "", colnames(countdata))
+colnames(countdata) <- gsub("_", "", colnames(countdata))
+colnames(countdata) <- gsub("na", "", colnames(countdata))
+
+countdata %>%select(!Chr:Length) -> countdata
+```
+
+Subset Mote samples to remove 5 diseased samples that were clustering with controls
+```{r}
+countdata %>% 
+  select(-K76D1, -K80D1, -K82D1, -K78D1, -K74D1) -> subset_Mote
+
+write_csv(subset_Mote, "subset_mote_ofav_rawcounts.csv")
+```
+
+create metadata file
+```{r}
+#making the metadata file for the sample and treatment information
+meta2=data.frame(sample = colnames(subset_Mote),
+                condition = stringr::str_detect(pattern = "control",string = colnames(subset_Mote))
+                )
+#changing TRUE and FALSE for condition to Control and Wounded
+meta2$condition[str_detect(meta2$condition,"TRUE")] <- "Control"
+meta2$condition[str_detect(meta2$condition,"FALSE")] <- "Diseased"
+
+meta2<-meta2 %>% column_to_rownames("sample")
+
+ncol(subset_Mote) == nrow(meta2)
+
+countdata_subset_matrix <- as.matrix(subset_Mote)
+```
+
+Create DESeq Object
+
+1. all mote samples (samples = x, genes = 30175)
+2. filtered mote samples (samples = y, genes = 30175)
+3. 
+
+```{r}
+dds_ofav <- DESeqDataSetFromMatrix(countData=countdata_subset_matrix, colData=meta2, design= ~condition)
+summary(results(dds_ofav))
+
+nrow(countdata_subset_matrix)
+
+#different ways to pre-filter low counts
+keep <- rowSums(counts(dds_ofav)) >= 10 #removing anything with counts less than 10, suggested by DESeq2 vignette by Michael Love
+dds_ofav <- dds_ofav[keep,]
+#23,837 genes with counts over 10
+summary(results(dds_ofav), alpha = 0.05) #low counts 4479
+
+keep2<- rowSums(counts(dds_ofav)>=4) >=5
+dds_ofav2 <- dds_ofav[keep2,] #21003 genes
+dds_ofav2 <- DESeq(dds_ofav2)
+summary(results(dds_ofav2), alpha = 0.05) #low counts 408
+res_ofav2 <- results(dds_ofav2, alpha = 0.05)
+
+# filtering less than 4 samples with counts less than or equal to 5
+
+nrow(dds_ofav)
+nrow(dds_ofav2)
+nrow(dds_ofav3)
+
+keep3 <- rowSums(cpm(dds_ofav) >= 1) >=3
+dds_ofav3<-dds_ofav[keep3,] #23259 genes
+dds_ofav3<-DESeq(dds_ofav3)
+summary(results(dds_ofav3), alpha = 0.05) #low counts 2255
+
+keep_90 <- rowSums(counts(dds_ofav) >= 10) > (nrow(meta2)*0.9)
+dds_ofav_wgcna <- dds_ofav[keep_90, ]
+table(keep_90)
+# 4,353 genes with counts over 10 in 90% of samples - useful for WGCNA because we need to subset them... can't use all 23,000+ genes
+
+#Perform DESeq2 analysis
+dds_ofav <- DESeq(dds_ofav)
+
+resultsNames(dds_ofav)
+
+lfc_shrink_ofav_res <- lfcShrink(dds_ofav, coef="condition_Diseased_vs_Control", type="apeglm") 
+#Shrinkage of effect size (LFC estimates) is useful for visualization and ranking of genes
+#apeglm method for effect size shrinkage (Zhu, Ibrahim, and Love 2018), which improves on the previous estimator
+
+res_ofav <- results(dds_ofav, alpha = 0.05) #alpha is set for FDR adjusted p-values (that is default of DESeq2)
+summary(results(dds_ofav))
+
+sum(res_ofav$padj < 0.05, na.rm=TRUE) #4823 genes
+
+summary(res_ofav)
+
+normalized_counts_ofav_Mote <- counts(dds_ofav, normalized=TRUE)
+
+write.table(normalized_counts_ofav_Mote, file="normalized_counts_mote_ofav.txt", sep="\t", quote=F, col.names=NA)
+
+ofav_results_table <- (as.data.frame(res_ofav2)) 
+
+ofav_results_table %>% rownames_to_column("Locus") -> ofav_results_table
+
+dds_vst_ofav <- vst(dds_ofav, blind = T) #use blind = TRUE to not account for experimental design
+
+plotPCA(dds_vst_ofav)
+```
+
+PCA Axes 1 and 2 with GGplot
+```{r}
+pca12 <- plotPCA(dds_vst_ofav,intgroup=c("condition"),returnData = TRUE)
+ggplot(pca12, aes(PC1, PC2,color=condition)) + 
+  geom_point(size=3) +  xlab(paste0("PC1 45% variance")) + 
+  ylab(paste0("PC2 13% variance")) + 
+  theme(legend.position="right")  + 
+  theme(text = element_text(size=10))  + 
+  theme(legend.key.size = unit(0.5, "cm")) + 
+  geom_point(size = 3) +
+  theme_classic() + 
+  stat_ellipse(aes(PC1, PC2, group=condition), type = "norm") +
+  scale_color_manual(values = (c("#7CBAF5", "#AD161A")))
+ggsave("PCA_ofav_Mote_removeddiseased.png")
+
+```
+
+Gene features to results table
+```{r}
+ofav_prot <- read.csv("Ofav_Mote/ofav_proteins_13173_311351.csv")
+
+eggNOGcols <- c("Query", "seed_eggNOG_ortholog",	"seed_ortholog_evalue",	"seed_ortholog_score",	"best_tax_level",	"Preferred_name",	"GOs",	"EC",	"KEGG_ko",	"KEGG_Pathway",	"KEGG_Module",	"KEGG_Reaction",	"KEGG_rclass",	"BRITE",	"KEGG_TC",	"CAZy",	"BiGG_Reaction", "annot lvl",	"matching OGs",	"Best OG",	"COG_cat",	"description")
+
+ofav_eggnog <- read.delim("Ofav_Mote/ofav.protein.emapper.annotations.csv", comment.char  = "#", header = F, col.names = eggNOGcols)
+
+ofav_eggnog %>% dplyr::rename(Protein.product = Query) -> ofav_eggnog
+
+#I THINK THESE ARE JOINING WRONG BECAUSE RESULTS TABLE HAS 23000 genes and then joining it with the protein one leads to 30,000 genes.... i don't think we want that?
+#JK yes we do want that.... a gene can make more than one protein.
+ofav_annot_DEG <- left_join(ofav_results_table, ofav_prot, by="Locus")
+write.csv(ofav_annot_DEG, "ofav_annotated_DEG_Mote.csv")
+
+ofav_annot_DEG$Locus %>% unique %>% length() #there are 21113 unique loci/genes 
+
+ofav_results_table$Locus %>% unique %>% length() #there are 21113 unique loci/genes
+
+#check these tables before uploading them to basecamp
+ofav_annot_DEG_emap <- left_join(ofav_annot_DEG, ofav_eggnog, by="Protein.product")
+
+ofav_annot_DEG_emap$Locus %>% unique %>% length() #checking that all 23837 genes were included, yes they were
+
+write.csv(ofav_annot_DEG_emap, "ofav_annotated_DEG_Mote_eggnog.csv")
+```
+
+
+Principal Coordinates Analysis - 
+to assess overall similarity between samples: Which samples are similar to each other, which are different? Does this fit to the expectation from the experiment’s design?
+```{r}
+# Calculate distances among samples
+sampleDists <- dist(t(assay(dds_vst_ofav)), method = "manhattan")
+sampleDistMatrix <- as.matrix(sampleDists)
+
+# Calculate MDS
+mds <- as.data.frame(colData(dds_vst_ofav)) %>% 
+  cbind(cmdscale(sampleDistMatrix))
+
+# Calculate MDS and use eigenvectors to determine proport
+mds_eig <- cmdscale(sampleDistMatrix, eig = TRUE)
+mds_eigenvectors <- data.frame(mds_eig$eig) %>% 
+  mutate(prop_var = mds_eig.eig / sum(mds_eig.eig))
+
+# Calculate Treatment centroids for plotting
+mds_trmt <- mds %>%
+  group_by(condition) %>%
+  dplyr::summarise(c1 = mean(`1`), c2 = mean(`2`)) %>%    
+  full_join(mds)
+
+# Plot with spiders
+ggplot(mds_trmt, aes(fill =condition)) +
+  #stat_ellipse(aes(x = `1`, y = `2`, color = condition, fill = condition), geom = "polygon", type = "norm", alpha = 0.0) + 
+  # sample-centroid spiders paths
+  geom_segment(mapping = aes(x = `1`, y = `2`, xend = c1, yend = c2),
+               lwd = 0.25, col = "dark grey") +
+  # treatment centroid points
+  geom_point(size = 3, aes(x = c1, y = c2, color = condition), fill = "black", shape = 21, stroke = 2, show.legend = TRUE) +
+  # sample points
+  geom_point(size = 3, aes(x = `1`, y = `2`, color = condition), stroke = 0.5, show.legend = FALSE) +
+  scale_color_manual(values = (c("#7CBAF5", "#AD161A"))) +
+  theme_bw() +
+  labs(x = "MDS1", y = "MDS2")
+
+```
+
+MA plots
+```{r}
+plotMA(res_ofav, ylim = c(-10,20))
+```
+
+
+Volcano plots with DEGs
+
+```{r}
+
+
+EnhancedVolcano(res_ofav2,
+    lab = NA,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    col=c('grey', 'black', 'blue', 'purple'))
+ggsave("volcanoplot_ofav.png", height = 12, width = 10)
+#The default cut-off for log2FC is >|2|; the default cut-off for P value is 10e-6. 
+
+# Make a basic volcano plot
+with(res_ofav, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-6,12)))
+
+# Add colored points: light blue if padj<0.01, purple if log2FC>1 and padj<0.05) Adjusted p-value based on FDR, not Bonferroni b/c of DESeq2
+with(subset(res_ofav, padj<.05 ), points(log2FoldChange, -log10(pvalue), pch=20, col="lightblue"))
+with(subset(res_ofav, padj<.05 & abs(log2FoldChange)>2), points(log2FoldChange, -log10(pvalue), pch=20, col="purple"))
+```
+
+heatmap
+```{r custom annot file for bingo and cytoscape}
+ofav_annot_DEG_emap %>% dplyr::select(Protein.product, GOs) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(GOs, sep = ",") %>%
+  mutate(GOs = str_remove(GOs, "GO:")) %>% 
+  unite(x, c(Protein.product, GOs), sep = " = ", remove = T) -> caf_go
+
+View(caf_go)
+
+write.table(caf_go,
+            file = "~/Desktop/cyto_ofav_input.txt",
+            quote=F, 
+            row.names=F, 
+            col.names=F)
+```
+
+
+```{r}
+ofav_annot_DEG %>% 
+  filter(padj < 0.01) %>%
+  select(Protein.product) %>% 
+  drop_na() %>% 
+  column_to_rownames(var = "Protein.product") %>% 
+  row.names(.) -> ofav_01
+
+ofav_annot_DEG %>% 
+  filter(padj < 0.05) %>%
+  select(Protein.product) %>% 
+  drop_na() %>% 
+  column_to_rownames(var = "Protein.product") %>% 
+  row.names(.) -> ofav_05
+
+```
+
+
+
+```{r}
+topVarGenes <- head(order(-rowVars(assay(dds_vst_ofav))),20)
+mat <- assay(dds_vst_ofav)[ topVarGenes, ]
+mat <- mat - rowMeans(mat)
+df <- as.data.frame(colData(dds_vst_ofav))
+df %>% select(condition) -> df
+
+png("ofav_heatmap.png")
+pheatmap(mat, annotation_col=df) 
+
+View(order(-rowVars(assay(dds_vst_ofav))))
+
+View(rowVars(assay(dds_vst_ofav)))
+```
+
+
+WGCNA
+```{r}
+# Normalize expression data for WGCNA using VST tranformation
+vsd_ofav_wgcna <- vst(dds_ofav_wgcna, blind = TRUE)
+
+allowWGCNAThreads(nThreads = 4)
+
+# obtain vst-transformed counts
+countdata_vst_ofav <- assay(vsd_ofav_wgcna)
+
+# Convert to matrix and transpose, check dimensions
+datExpr_ofav <- t(countdata_vst_ofav)
+dim(datExpr_ofav)
+#21 samples, 4,353 genes...
+
+# Find correlation power R^N that satisfies scale free critereon (SFT.R.sq>0.9)
+sft_ofav <- pickSoftThreshold(datExpr_ofav, verbose=5)
+sft_ofav$powerEstimate
+# Power estimate: 16
+
+# This follows the tutorial: 
+# https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/FemaleLiver-02-networkConstr-man.pdf
+# 
+#From Mike Connelly:
+# I have chosen the following network construction parameters for the following reasons:
+# First, following the recommendations of the WGCNA developers (https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/faq.html), a signed network was chosen to be able to detect positive and negative gene correlations, and the biweight midcorrelation was used since it is more robust to outliers. 
+
+adjacency <- adjacency(datExpr_ofav,
+      # Network construction arguments:  correlation, adjacency function,  and topological overlap map options
+                       corFnc = "bicor", # bimidweight correlation
+                       power = sft_ofav$powerEstimate, # 20 for coral, 5 for symbiont
+                       type = "signed") # signed
+# 
+TOM <- TOMsimilarity(adjacency,
+                     TOMType = "signed",
+                     verbose = 5)
+dissTOM <- 1-TOM
+# 
+rm(adjacency) # may need to delete adjacency, TOM to clear up vector memory
+
+
+geneTree_ofav <- flashClust(as.dist(dissTOM), method = "average")
+plot(geneTree_ofav, labels = FALSE, xlab="", sub="", main = "Gene clustering on TOM-based dissimilarity")
+
+# minModuleSize = 30 because Mike prefers large modules that lend themselves to enrichment tests with GO_MWU for easier interpretation.
+minModuleSize <- 30
+# Module identification using dynamic tree cut, with cutHeight = 0.99 and deepSplit = 2 based on the recommendations of the WGCNA developers
+dynamicMods <- cutreeDynamic(dendro = geneTree_ofav,
+                             distM = dissTOM,
+                             cutHeight = 0.99,
+                             deepSplit = 2,
+                             pamRespectsDendro = FALSE,
+                             minClusterSize = minModuleSize)
+table(dynamicMods)
+# Convert numeric labels into colors
+dynamicColors <- labels2colors(dynamicMods, colorSeq = standardColors())
+
+# Calculate eigengenes
+MEList <- moduleEigengenes(datExpr_ofav, colors = dynamicColors)
+MEs <- MEList$eigengenes
+# Calculate dissimilarity of module eigengenes
+MEDiss <- 1-cor(MEs);
+# Cluster module eigengenes
+METree <- flashClust(as.dist(MEDiss), method = "average");
+# Plot the result
+plot(METree, main = "Clustering of module eigengenes",
+xlab = "", sub = "")
+MEDissThres = 0.15
+# Plot the cut line into the dendrogram
+abline(h=MEDissThres, col = "red")
+
+# Call an automatic merging function
+# merge cutHeight = 0.3 because I want to group together modules with >85% similar module eigengene expression
+mergedMods <- mergeCloseModules(datExpr_ofav, dynamicColors, cutHeight = 0.15, verbose = 5)
+# The merged module colors
+mergedColors <- mergedMods$colors
+table(mergedColors) 
+```
+
+```{r}
+png(file = "WGCNA_dendrogram_Ofav.png")
+
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(dendro = geneTree_ofav, 
+                    colors = cbind(dynamicColors, mergedColors),
+                    groupLabels = c("Dynamic modules", "Merged dynamic"),
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05,
+                    abHeight = c(0.99))
+```
+```{r merged_eigengenes}
+MEList <- moduleEigengenes(datExpr_ofav, colors = mergedColors)
+mergedMEs <- MEList$eigengenes
+```
+```{r choose_modules}
+moduleColors <- mergedColors#netColors#
+MEs1 <- mergedMEs#netMEs#
+MEs1 <- MEs1 %>% select(-MEgrey)
+MEmodule_colors <- colnames(MEs1)
+module_colors <- gsub("ME", "", colnames(MEs1))
+colnames(MEs1) <- module_colors
+```
+```{r ME_clustering}
+datME <- MEs1
+dissimME <- (1-t(cor(datME, method="p")))/2
+hclustME <- flashClust(as.dist(dissimME), method="average" )
+# Plot the eigengene dendrogram
+par(mfrow=c(1,1))
+plot(hclustME, main="Clustering tree based on the module eigengenes")
+```
+```{r uniq_modules}
+# Extract all unique modules
+uniqModules <- unique(colnames(MEs1))
+# set in order according to ME clustering dendogram
+hclustME$order
+uniqModules <- uniqModules[hclustME$order]
+#
+uniqModules
+# create ordered factor for downstream analysis
+modules_factor <- factor(levels = uniqModules[hclustME$order], ordered = TRUE)
+```
+
+## Module genes and hub genes
+### *O. faveolata*
+```{r modules_genes}
+# Generate GeneIDs
+Genes <- colnames(datExpr_ofav)
+# Output genes and annotations for each module
+for (module in uniqModules)
+{
+# Select module genes
+inModule <- (moduleColors == module)
+# Get gene IDs
+modGeneIDs <- Genes[inModule] #this is the correct set of gene IDs!
+# Write gene annotations into a file
+fileName = paste(module, ".csv", sep="");
+module_annotation <- ofav_annot_DEG[ofav_annot_DEG$Locus %in% modGeneIDs, ]
+write_csv(module_annotation, path = fileName)
+}
+```
+
+
+```{r hub_genes}
+hubs <- chooseTopHubInEachModule(datExpr_ofav,
+                         mergedColors,
+                         corFnc = "bicor", # bimidweight correlation
+                         power=sft_ofav$powerEstimate, # 16
+                         # power = 10,
+                         type = "signed")
+hub_genes <- ofav_annot_DEG[ofav_annot_DEG$Locus %in% hubs, ]
+
+hub_genes %>% arrange(Locus) %>% mutate(module =  c("darkgreen", "darkgreen", "midnightblue","lightgreen","blue","royalblue","royalblue","brown", "lightyellow", "magenta", "darkred", "pink","greenyellow","turquoise","tan","salmon","lightcyan","grey60","grey60","yellow","black","cyan","cyan")) -> hub_genes
+
+row.names(hub_genes) <- NULL 
+hub_genes <- hub_genes %>% dplyr::select(module, everything())
+write_csv(hub_genes, "hub_genes_WGCNA_ofav.csv")
+```
+
+## Module eigengene correlations
+```{r}
+# Tidy sample metadata into a format WGCNA can use for correlations
+ofav_mote_traits <- metadata %>% 
+  select(Working.Label, Project, Species, percent_disease_progress, Correct_treatment) %>% 
+  filter(Project == "Mote") %>% 
+  filter(Species == "Ofav") %>% 
+  filter(Working.Label!="K74", Working.Label!="K76", Working.Label!="K78",Working.Label!="K80",Working.Label!="K82")
+#-K76D1, -K80D1, -K82D1, -K78D1, -K74D1
+ofav_mote_traits$percent_disease_progress[ofav_mote_traits$percent_disease_progress=="control"] <- 0
+for (i in 1:nrow(ofav_mote_traits)){
+if (ofav_mote_traits$Correct_treatment[i] == "control") {
+  ofav_mote_traits$control[i] <- "1"
+} else {
+  ofav_mote_traits$control[i] <- "0"
+}
+}
+# 
+for (i in 1:nrow(ofav_mote_traits)){
+if (ofav_mote_traits$Correct_treatment[i] == "diseased") {
+  ofav_mote_traits$disease[i] <- "1"
+} else {
+  ofav_mote_traits$disease[i] <- "0"
+}
+}
+ofav_mote_traits_final <- ofav_mote_traits %>%
+  column_to_rownames("Working.Label") %>% 
+  select(-Correct_treatment)
+```
+
+
+```{r}
+MET = orderMEs(cbind(MEs, condition))
+# Plot the relationships among the eigengenes and the trait
+sizeGrWindow(5,7.5);
+par(cex = 0.9)
+plotEigengeneNetworks(MET, "", marDendro = c(0,4,1,2), marHeatmap = c(3,4,1,2), cex.lab = 0.8, xLabelsAngle
+= 90)
+```
+
+
+

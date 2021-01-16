@@ -1,0 +1,148 @@
+---
+title: "sctld_mcav"
+author: "Allyson DeMerlis"
+date: "1/6/2021"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(DESeq2)
+library(ggrepel)
+library(apeglm)
+library(EnhancedVolcano)
+library(ComplexHeatmap)
+library(pheatmap)
+library(genefilter)
+```
+
+Editing counts datafile 
+```{r}
+mcav_counts <- read.table("mcav_counts", header = T)
+
+# Project Species Status n
+# Mote	Mcav	control   17	
+# Mote	Mcav	exposed	  18	
+# Smithsonian	Mcav	control	3	
+# Smithsonian	Mcav	exposed	4	
+
+mcav_counts %>% 
+  select(-Geneid, -Chr, -Start, -End, -Strand, -Length) -> mcav_counts
+
+colnames(mcav_counts) <- gsub("Aligned.sortedByCoord.out.bam_unique.bam", "", colnames(mcav_counts))
+colnames(mcav_counts) <- gsub("Mcav_na_", "", colnames(mcav_counts))
+colnames(mcav_counts) <- gsub("_", "", colnames(mcav_counts))
+colnames(mcav_counts) <- gsub("na", "", colnames(mcav_counts))
+```
+
+read in metadata file
+```{r}
+mcav_metadata <- read_csv("mcav_metadata_fixed.csv")
+```
+
+Mcav with both SMS and Mote
+```{r}
+mcav_metadata=data.frame(sample = colnames(mcav_counts),
+                condition = stringr::str_detect(pattern = "control",string = colnames(mcav_counts))
+                )
+
+mcav_metadata$condition[str_detect(mcav_metadata$condition,"TRUE")] <- "Control"
+mcav_metadata$condition[str_detect(mcav_metadata$condition,"FALSE")] <- "Diseased"
+mcav_metadata<-mcav_metadata %>% column_to_rownames("sample")
+
+ncol(mcav_counts) == nrow(mcav_metadata)
+
+countdata_mcav_matrix <- as.matrix(mcav_counts)
+```
+
+Gene/Protein Annotations
+```{r}
+eggNOGcols <- c("Query", "seed_eggNOG_ortholog",	"seed_ortholog_evalue",	"seed_ortholog_score",	"best_tax_level",	"Preferred_name",	"GOs",	"EC",	"KEGG_ko",	"KEGG_Pathway",	"KEGG_Module",	"KEGG_Reaction",	"KEGG_rclass",	"BRITE",	"KEGG_TC",	"CAZy",	"BiGG_Reaction", "annot lvl",	"matching OGs",	"Best OG",	"COG_cat",	"description")
+
+mcav_annotation <- read_csv("mcav_annot.csv")
+mcav_eggnog <- read.delim("mcav.protein.emapper.annotations", comment.char  = "#", header = F,  col.names = eggNOGcols)
+```
+
+Mcav both DESeq object
+```{r}
+dds_mcav <- DESeqDataSetFromMatrix(countData=countdata_mcav_matrix, colData=mcav_metadata, design= ~condition)
+
+nrow(dds_mcav) #24740 genes
+#after filtering 10
+
+keep_tencounts <-  rowSums(counts(dds_mcav)) >= 10
+dds_mcav <- dds_mcav[keep_tencounts, ]
+# 16,313 genes with counts over 10
+nrow(dds_mcav) #16313 genes
+
+keep_90 <- rowSums(counts(dds_mcav) >= 10) > (ncol(dds_mcav)*0.5)
+dds_mcav_wgcna <- dds_mcav[keep_90, ]
+table(keep_90)
+#3756 genes
+
+keep2<- rowSums(counts(dds_mcav)>=4) >=5
+dds_mcav2 <- dds_mcav[keep2, ]
+dds_mcav2 <- DESeq(dds_mcav2)
+res_mcav2 <- results(dds_mcav2)
+summary(res_mcav2) #
+
+dds_mcav <- DESeq(dds_mcav)
+
+resultsNames(dds_mcav)
+
+res_mcav <- results(dds_mcav, alpha = 0.05) #FDR p-adjusted
+
+summary(res_mcav) #2783 outliers, 7002 low counts
+
+sum(res_mcav$padj < 0.05, na.rm=TRUE) #356 genes
+
+normalized_counts_mcav <- counts(dds_mcav, normalized=TRUE)
+write.table(normalized_counts_mcav, file="normalized_counts_mcav.txt", sep="\t", quote=F, col.names=NA)
+
+dds_vst_mcav <- vst(dds_mcav, blind = T)
+
+plotPCA(dds_vst_mcav)
+
+#split experiment 
+```
+
+ggplot PCA
+```{r}
+pca12_mcav <- plotPCA(dds_vst_mcav,intgroup=c("condition"),returnData = TRUE)
+ggplot(pca12_mcav, aes(PC1, PC2,color=condition)) + 
+  geom_point(size=3) +  xlab(paste0("PC1 21% variance")) + 
+  ylab(paste0("PC2 17% variance")) + 
+  theme(legend.position="right")  + 
+  theme(text = element_text(size=10))  + 
+  theme(legend.key.size = unit(0.5, "cm")) + 
+  geom_point(size = 3) +
+  theme_classic() + 
+  stat_ellipse(aes(PC1, PC2, group=condition), type = "norm") +
+  scale_color_manual(values = (c("#7CBAF5", "#AD161A")))
+ggsave("PCA_mcav_bothSMSandMote.png")
+```
+
+
+Annotating Results Tables
+```{r}
+mcav_results_table <- (as.data.frame(res_mcav)) 
+
+mcav_results_table %>% rownames_to_column("Locus") -> mcav_results_table
+
+mcav_eggnog %>% dplyr::rename(Protein.product = Query) -> mcav_eggnog
+
+ofav_annot_DEG <- left_join(ofav_results_table, ofav_prot, by="Locus")
+write.csv(ofav_annot_DEG, "ofav_annotated_DEG_Mote.csv")
+
+ofav_annot_DEG$Locus %>% unique %>% length() #there are 23837 unique loci/genes 
+
+ofav_results_table$Locus %>% unique %>% length() #there are 23837 unique loci/genes
+
+#check these tables before uploading them to basecamp
+ofav_annot_DEG_emap <- left_join(ofav_annot_DEG, ofav_eggnog, by="Protein.product")
+
+ofav_annot_DEG_emap$Locus %>% unique %>% length() #checking that all 23837 genes were included, yes they were
+
+write.csv(ofav_annot_DEG_emap, "ofav_annotated_DEG_Mote_eggnog.csv")
+```
+
