@@ -1,0 +1,144 @@
+---
+title: "sctld_ofav_paper_analysis"
+author: "Allyson DeMerlis"
+date: "1/18/2021"
+output: html_document
+---
+Install and Load Packages
+```{r}
+library(tidyverse)
+library(DESeq2)
+library(ggrepel)
+library(apeglm)
+library(EnhancedVolcano)
+library(ComplexHeatmap)
+library(pheatmap)
+library(genefilter)
+library(WGCNA)
+library(flashClust)
+library(edgeR) #counts per million
+```
+
+
+Import counts data for orbicella faveolata from feature counts (removed low read depth samples and kept only Mote samples)
+```{r}
+countdata <- read.delim("ofav_counts", row.names = 1, skip = 1)
+
+# Project Species Status n
+# Mote	Ofav	control	  19	
+# Mote	Ofav	exposed	  19	
+# Smithsonian	Ofav	control	3	
+# Smithsonian	Ofav	exposed	6	
+
+#reformatting the counts file for use
+colnames(countdata) <- gsub("X.scratch.projects.transcriptomics.mikeconnelly.projects.sctld_jamboree.tagseq.outputs.alignments.Ofav_na_", "", colnames(countdata))
+colnames(countdata) <- gsub("_na_Aligned.sortedByCoord.out.uniq.bam", "", colnames(countdata))
+colnames(countdata) <- gsub("_", "", colnames(countdata))
+colnames(countdata) <- gsub("na", "", colnames(countdata))
+
+countdata %>%select(!Chr:Length) -> countdata
+```
+
+Subset Mote samples to remove 5 diseased samples that were clustering with controls
+```{r}
+countdata %>% 
+  select(-K76D1, -K80D1, -K82D1, -K78D1, -K74D1) -> subset_Mote
+
+write_csv(subset_Mote, "subset_mote_ofav_rawcounts.csv")
+```
+
+create metadata file
+```{r}
+#making the metadata file for the sample and treatment information
+ofav_metadata=data.frame(sample = colnames(subset_Mote),
+                condition = stringr::str_detect(pattern = "control",string = colnames(subset_Mote))
+                )
+#changing TRUE and FALSE for condition to Control and Wounded
+ofav_metadata$condition[str_detect(ofav_metadata$condition,"TRUE")] <- "Control"
+ofav_metadata$condition[str_detect(ofav_metadata$condition,"FALSE")] <- "Diseased"
+
+ofav_metadata<-ofav_metadata %>% column_to_rownames("sample")
+
+ncol(subset_Mote) == nrow(ofav_metadata)
+
+countdata_ofav_matrix <- as.matrix(subset_Mote)
+```
+
+Create DESeq Object
+
+```{r}
+dds_ofav <- DESeqDataSetFromMatrix(countData=countdata_ofav_matrix, colData=meta2, design= ~condition)
+
+keep2<- rowSums(counts(dds_ofav)>=4) >=5 # filtering less than 4 samples with counts less than or equal to 5
+dds_ofav2 <- dds_ofav[keep2,] #21003 genes
+dds_ofav2 <- DESeq(dds_ofav2)
+summary(results(dds_ofav2), alpha = 0.05) #low counts 0
+res_ofav2 <- results(dds_ofav2, alpha = 0.05)
+
+nrow(dds_ofav2) #20195 genes
+
+normalized_counts_ofav_Mote <- counts(dds_ofav, normalized=TRUE)
+
+write.table(normalized_counts_ofav_Mote, file="normalized_counts_mote_ofav.txt", sep="\t", quote=F, col.names=NA)
+
+ofav_results_table <- (as.data.frame(res_ofav2)) 
+
+ofav_results_table %>% rownames_to_column("Locus") -> ofav_results_table
+
+dds_vst_ofav2 <- vst(dds_ofav2, blind = T) #use blind = TRUE to not account for experimental design
+
+plotPCA(dds_vst_ofav2)
+```
+
+```{r}
+pca12 <- plotPCA(dds_vst_ofav2,intgroup=c("condition"),returnData = TRUE)
+ggplot(pca12, aes(PC1, PC2,color=condition)) + 
+  geom_point(size=3) +  xlab(paste0("PC1 44% variance")) + 
+  ylab(paste0("PC2 12% variance")) + 
+  theme(legend.position="right")  + 
+  theme(text = element_text(size=10))  + 
+  theme(legend.key.size = unit(0.5, "cm")) + 
+  geom_point(size = 3) +
+  theme_classic() + 
+  stat_ellipse(aes(PC1, PC2, group=condition), type = "norm") +
+  scale_color_manual(values = (c("#7CBAF5", "#AD161A")))
+ggsave("PCA_ofav_Mote_final.png")
+```
+
+
+Transcript ID features to results table
+```{r}
+ofav_prot <- read.csv("Ofav_Mote/ofav_proteins_13173_311351.csv")
+
+eggNOGcols <- c("Query", "seed_eggNOG_ortholog",	"seed_ortholog_evalue",	"seed_ortholog_score",	"best_tax_level",	"Preferred_name",	"GOs",	"EC",	"KEGG_ko",	"KEGG_Pathway",	"KEGG_Module",	"KEGG_Reaction",	"KEGG_rclass",	"BRITE",	"KEGG_TC",	"CAZy",	"BiGG_Reaction", "annot lvl",	"matching OGs",	"Best OG",	"COG_cat",	"description")
+
+ofav_eggnog <- read.delim("Ofav_Mote/ofav.protein.emapper.annotations.csv", comment.char  = "#", header = F, col.names = eggNOGcols)
+
+ofav_eggnog %>% dplyr::rename(Protein.product = Query) -> ofav_eggnog
+
+ofav_annot_DEG <- left_join(ofav_results_table, ofav_prot, by="Locus")
+write.csv(ofav_annot_DEG, "ofav_annotated_DEG_Mote.csv")
+
+ofav_annot_DEG$Locus %>% unique %>% length() #there are 20195 unique loci/genes 
+
+ofav_results_table$Locus %>% unique %>% length() #there are 20195 unique loci/genes
+
+#check these tables before uploading them to basecamp
+ofav_annot_DEG_emap <- left_join(ofav_annot_DEG, ofav_eggnog, by="Protein.product")
+
+ofav_annot_DEG_emap$Locus %>% unique %>% length() #checking that all 20195 genes were included, yes they were
+
+write.csv(ofav_annot_DEG_emap, "ofav_annotated_DEG_Mote_eggnog.csv")
+```
+
+Volcano plots with DEGs
+```{r}
+EnhancedVolcano(res_ofav2,
+    lab = NA,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    col=c('grey', 'black', 'blue', 'purple'))
+ggsave("volcanoplot_ofav.png", height = 12, width = 10)
+#The default cut-off for log2FC is >|2|; the default cut-off for P value is 10e-6. 
+```
+

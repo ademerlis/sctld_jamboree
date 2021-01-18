@@ -18,16 +18,16 @@ library(genefilter)
 
 Editing counts datafile 
 ```{r}
-mcav_counts <- read.table("mcav_counts", header = T)
-
+mcav_counts <- read.table("mcav_counts", header = T) %>% 
+  column_to_rownames(var = "Geneid") %>% 
+  select(-Chr, -Start, -End, -Strand, -Length) -> mcav_counts #17 samples
+  
 # Project Species Status n
 # Mote	Mcav	control   17	
 # Mote	Mcav	exposed	  18	
 # Smithsonian	Mcav	control	3	
 # Smithsonian	Mcav	exposed	4	
-
-mcav_counts %>% 
-  select(-Geneid, -Chr, -Start, -End, -Strand, -Length) -> mcav_counts
+#Total samples = 42
 
 colnames(mcav_counts) <- gsub("Aligned.sortedByCoord.out.bam_unique.bam", "", colnames(mcav_counts))
 colnames(mcav_counts) <- gsub("Mcav_na_", "", colnames(mcav_counts))
@@ -55,26 +55,23 @@ ncol(mcav_counts) == nrow(mcav_metadata)
 countdata_mcav_matrix <- as.matrix(mcav_counts)
 ```
 
-Gene/Protein Annotations
-```{r}
-eggNOGcols <- c("Query", "seed_eggNOG_ortholog",	"seed_ortholog_evalue",	"seed_ortholog_score",	"best_tax_level",	"Preferred_name",	"GOs",	"EC",	"KEGG_ko",	"KEGG_Pathway",	"KEGG_Module",	"KEGG_Reaction",	"KEGG_rclass",	"BRITE",	"KEGG_TC",	"CAZy",	"BiGG_Reaction", "annot lvl",	"matching OGs",	"Best OG",	"COG_cat",	"description")
-
-mcav_annotation <- read_csv("mcav_annot.csv")
-mcav_eggnog <- read.delim("mcav.protein.emapper.annotations", comment.char  = "#", header = F,  col.names = eggNOGcols)
-```
-
 Mcav both DESeq object
 ```{r}
 dds_mcav <- DESeqDataSetFromMatrix(countData=countdata_mcav_matrix, colData=mcav_metadata, design= ~condition)
 
 nrow(dds_mcav) #24740 genes
-#after filtering 10
+# 
+# keep_tencounts <-  rowSums(counts(dds_mcav)) >= 10
+# dds_mcav <- dds_mcav[keep_tencounts, ]
+# # 16,313 genes with counts over 10
+# nrow(dds_mcav) #16313 genes
+# summary(res_mcav) #2783 outliers, 7002 low counts
+# dds_mcav <- DESeq(dds_mcav)
+# resultsNames(dds_mcav)
+# res_mcav <- results(dds_mcav, alpha = 0.05) #FDR p-adjusted
+# sum(res_mcav$padj < 0.05, na.rm=TRUE) #356 genes
 
-keep_tencounts <-  rowSums(counts(dds_mcav)) >= 10
-dds_mcav <- dds_mcav[keep_tencounts, ]
-# 16,313 genes with counts over 10
-nrow(dds_mcav) #16313 genes
-
+#for WGCNA
 keep_90 <- rowSums(counts(dds_mcav) >= 10) > (ncol(dds_mcav)*0.5)
 dds_mcav_wgcna <- dds_mcav[keep_90, ]
 table(keep_90)
@@ -84,33 +81,22 @@ keep2<- rowSums(counts(dds_mcav)>=4) >=5
 dds_mcav2 <- dds_mcav[keep2, ]
 dds_mcav2 <- DESeq(dds_mcav2)
 res_mcav2 <- results(dds_mcav2)
-summary(res_mcav2) #
+summary(res_mcav2) #9210 genes, 1096 outliers, 1539 low counts
+#let's use this one because less outliers and low counts than originl
 
-dds_mcav <- DESeq(dds_mcav)
-
-resultsNames(dds_mcav)
-
-res_mcav <- results(dds_mcav, alpha = 0.05) #FDR p-adjusted
-
-summary(res_mcav) #2783 outliers, 7002 low counts
-
-sum(res_mcav$padj < 0.05, na.rm=TRUE) #356 genes
-
-normalized_counts_mcav <- counts(dds_mcav, normalized=TRUE)
+normalized_counts_mcav <- counts(dds_mcav2, normalized=TRUE)
 write.table(normalized_counts_mcav, file="normalized_counts_mcav.txt", sep="\t", quote=F, col.names=NA)
 
-dds_vst_mcav <- vst(dds_mcav, blind = T)
+dds_vst_mcav <- vst(dds_mcav2, blind = T)
 
 plotPCA(dds_vst_mcav)
-
-#split experiment 
 ```
 
 ggplot PCA
 ```{r}
 pca12_mcav <- plotPCA(dds_vst_mcav,intgroup=c("condition"),returnData = TRUE)
 ggplot(pca12_mcav, aes(PC1, PC2,color=condition)) + 
-  geom_point(size=3) +  xlab(paste0("PC1 21% variance")) + 
+  geom_point(size=3) +  xlab(paste0("PC1 20% variance")) + 
   ylab(paste0("PC2 17% variance")) + 
   theme(legend.position="right")  + 
   theme(text = element_text(size=10))  + 
@@ -122,27 +108,46 @@ ggplot(pca12_mcav, aes(PC1, PC2,color=condition)) +
 ggsave("PCA_mcav_bothSMSandMote.png")
 ```
 
+Gene/Protein Annotations
+```{r}
+eggNOGcols <- c("Query", "seed_eggNOG_ortholog",	"seed_ortholog_evalue",	"seed_ortholog_score",	"best_tax_level",	"Preferred_name",	"GOs",	"EC",	"KEGG_ko",	"KEGG_Pathway",	"KEGG_Module",	"KEGG_Reaction",	"KEGG_rclass",	"BRITE",	"KEGG_TC",	"CAZy",	"BiGG_Reaction", "annot lvl",	"matching OGs",	"Best OG",	"COG_cat",	"description")
+
+mcav_prot <- read_csv("mcav_annot.csv")
+mcav_eggnog <- read.delim("mcav.protein.emapper.annotations", comment.char  = "#", header = F,  col.names = eggNOGcols)
+```
 
 Annotating Results Tables
 ```{r}
-mcav_results_table <- (as.data.frame(res_mcav)) 
+mcav_results_table <- (as.data.frame(res_mcav2)) 
 
-mcav_results_table %>% rownames_to_column("Locus") -> mcav_results_table
+mcav_results_table %>% rownames_to_column("transcript_id") -> mcav_results_table
 
-mcav_eggnog %>% dplyr::rename(Protein.product = Query) -> mcav_eggnog
+mcav_eggnog %>% dplyr::rename(geneid = Query) -> mcav_eggnog
 
-ofav_annot_DEG <- left_join(ofav_results_table, ofav_prot, by="Locus")
-write.csv(ofav_annot_DEG, "ofav_annotated_DEG_Mote.csv")
+mcav_annot_DEG <- left_join(mcav_results_table, mcav_prot, by="transcript_id")
+write.csv(mcav_annot_DEG, "mcav_annotated_DEG.csv")
 
-ofav_annot_DEG$Locus %>% unique %>% length() #there are 23837 unique loci/genes 
+mcav_annot_DEG$geneid %>% unique %>% length() #there are 9210 unique loci/genes 
 
-ofav_results_table$Locus %>% unique %>% length() #there are 23837 unique loci/genes
+mcav_results_table$geneid %>% unique %>% length() #there are 9210 unique loci/genes
 
 #check these tables before uploading them to basecamp
-ofav_annot_DEG_emap <- left_join(ofav_annot_DEG, ofav_eggnog, by="Protein.product")
+mcav_annot_DEG_emap <- left_join(mcav_annot_DEG, mcav_eggnog, by="geneid")
+mcav_annot_DEG_emap$geneid %>% unique %>% length() #checking that all 9210 genes were included, yes they were
 
-ofav_annot_DEG_emap$Locus %>% unique %>% length() #checking that all 23837 genes were included, yes they were
-
-write.csv(ofav_annot_DEG_emap, "ofav_annotated_DEG_Mote_eggnog.csv")
+write.csv(mcav_annot_DEG_emap, "mcav_annotated_DEG_eggnog.csv")
 ```
+
+
+Volcano plots with DEGs
+```{r}
+EnhancedVolcano(res_mcav2,
+    lab = NA,
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    col=c('grey', 'black', 'blue', 'purple'))
+ggsave("volcanoplot_mcav.png", height = 12, width = 10)
+#The default cut-off for log2FC is >|2|; the default cut-off for P value is 10e-6. 
+```
+
 
