@@ -1,0 +1,685 @@
+---
+title: "SCTLD_ofav_mcav_prep"
+author: "Benjamin Young"
+date: "28/04/2021"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(reshape2)
+library(seqinr)
+library(Biostrings)
+library(tximport)
+library(stringi)
+```
+
+# Metadata File
+
+```{r reading and prepping metadata, include = F}
+read.csv(file = "~/Desktop/SCTLD_review/metadata.csv") %>% 
+  unite(sample_name, c(Working.Label, Treatment), sep = "", remove = FALSE) -> all_meta
+#View(all_meta)
+```
+
+```{r}
+mcav_counts %>%
+           t() %>% 
+           as.data.frame() %>% 
+           rownames() -> mcav_samples
+
+ofav_counts %>%
+           t() %>% 
+           as.data.frame() %>% 
+           rownames() -> ofav_samples
+
+View(ofav_samples)
+View(all_meta)
+
+all_meta %>% 
+  filter(salmon_label %in% mcav_samples) %>%
+  column_to_rownames(var = "salmon_label") -> mcav_metadata
+
+all_meta %>% 
+  filter(salmon_label %in% ofav_samples) %>%
+  column_to_rownames(var = "salmon_label") %>% 
+  filter(!Correct_treatment %in% c("healthy")) %>% 
+  filter(!Experiment %in% c("exp_3")) -> ofav_metadata
+
+View(ofav_metadata)
+# View(mcav_metadata)
+```
+
+
+
+# Orbicella Faveolata
+## Annotation File Building
+
+So we have the ocunt matrix, now we need to build the annotation file from this. 
+
+Starting with the mRNA molecules. We shall build this from the CDS which has the annotations in the headers. 
+
+### 1) mRNA and mitochondrial RNA Annotations
+
+```{bash generating mRNA from GFF}
+cat /Users/benyoung/Desktop/SCTLD_review/gff_files/GCF_002042975.1_ofav_dov_v1_genomic.gff | grep -v "#" | awk '$3=="mRNA"' | cut -f9 | tr -s ";" " " | awk '{print$1"\t"$2}' | sort | uniq | sed 's/ID=//g' | sed 's/Parent=//g' > /Users/benyoung/Desktop/SCTLD_review/gff_files/mrna2gene_ofav.tsv
+```
+
+```{r}
+read.table(file = "/Users/benyoung/Desktop/SCTLD_review/gff_files/mrna2gene_ofav.tsv") %>% 
+  mutate(Transcript_ID = V1, 
+         Gene_ID = V2) %>% 
+  dplyr::select(-V1, -V2) -> tx_t_ofav
+
+#iew(tx_t_ofav)
+
+tx_t_ofav$Gene_ID %>% unique() %>% length
+tx_t_ofav$Transcript_ID %>% unique() %>% length
+#View(tx_t_ofav)
+```
+
+This has 
+- 25916 genes
+- 32574 transcripts (thus we have le isoforms oh goody goody)
+
+```{r Making longest isoform}
+fastaFile_mrna <- readDNAStringSet("/Users/benyoung/Desktop/SCTLD_review/genome_files/ofav/GCF_002042975.1_ofav_dov_v1_translated_cds.faa")
+seq_name_m = names(fastaFile_mrna)
+sequence_m = paste(fastaFile_mrna)
+
+data.frame(seq_name_m, sequence_m) -> cds_sequences
+nrow(cds_sequences)
+View(cds_sequences)
+```
+
+This has *32,587* genes. Hmmmmm
+Update - This includes the mitochondrial sequences (quick maths, 32587-32574 = 13 mito genes)
+
+
+```{r}
+data.frame(seq_name_m, sequence_m) %>%
+  mutate(Gene_ID = str_extract(seq_name_m, pattern = "gene\\=.* \\[d"),
+         Gene_ID = str_replace(Gene_ID, pattern = "\\] \\[d", replacement = ""),
+         Gene_ID = str_replace(Gene_ID, pattern = "gene\\=", replacement = ""),
+         Gene.Annotation = str_extract(seq_name_m, pattern = "protein\\=.* \\[protein"),
+         Gene.Annotation = str_replace(Gene.Annotation, pattern =  "\\] \\[protein$", replacement = ""),
+         Gene.Annotation = str_replace(Gene.Annotation, pattern =  "^protein\\=", replacement = ""),
+         Protein.Identifier = str_extract(seq_name_m, pattern = "protein_id\\=.* \\[l"), 
+         Protein.Identifier = str_replace(Protein.Identifier, pattern = "\\] \\[l", replacement = ""),
+         Protein.Identifier = str_replace(Protein.Identifier, pattern = "^protein_id\\=", replacement = ""), 
+         notes = "mrnas_and_mitochondrial_RNAS") %>%
+  dplyr::select(Gene_ID, Gene.Annotation, Protein.Identifier, sequence_m, notes) %>% 
+  distinct(Gene_ID, .keep_all = T) -> ofav_annots
+View(ofav_annots)
+nrow(ofav_annots)
+#   mutate(Gene.id = str_replace(b, "]", ""), 
+#          Gene = "gene-") %>% nrow()
+#   tidyr::unite(Gene_ID, c(Gene, Gene.id), sep = "") %>% nrow()
+
+
+## taking the generated annotations file and only taking longest isoforms and one entry for each gene
+ofav_annots %>% 
+  distinct(Gene_ID, .keep_all = T) -> annots_to_gene_level
+
+## checkign length of annot gene and tx import, also a venn to see intersect
+annots_to_gene_level$Gene_ID %>% unique() %>% length
+tx_t_ofav$Gene_ID %>% unique() %>% length()
+
+venn(list(tx_t_ofav$Gene_ID, annots_to_gene_level$Gene_ID))
+```
+
+So here all matches up, the difference between the CDS protein file and the mrna2gene is the 13 mitochondrial sequences. 
+
+```{r Old shiz}
+# data.frame(seq_name_m, sequence_m) %>%
+#   separate(seq_name_m, c("a", "b", "c", "d", "e", "f", "g"), "\\[[a-z_]*=") %>% View()
+#   dplyr::select(b,c,d,e,8) %>% 
+#   mutate(Gene.id = str_replace(b, "]", ""), 
+#          Gene = "gene-") %>% nrow()
+#   tidyr::unite(Gene_ID, c(Gene, Gene.id), sep = "") %>% nrow()
+#   mutate(Gene_ID = str_replace(Gene_ID, " ", "")
+#     ,Gene.Annotation=d,
+#          Gene.Annotation = str_replace(d, "]", ""), 
+#          Protein.Identifier = str_replace(e, "]", "")) %>% 
+#   dplyr::select(Gene_ID, Gene.Annotation, Protein.Identifier, sequence_m) -> ofav_annots
+
+#   filter(duplicated(Gene_ID) |
+#            duplicated(Gene_ID, fromLast = T)) %>% 
+#   mutate(aa_length = str_length(sequence_m)) %>%
+#   group_by(Gene_ID) %>%
+#   top_n(1, abs(aa_length)) %>% 
+#   ungroup() %>% 
+#   distinct(Gene_ID, .keep_all = T) %>% View()
+#   dplyr::select(-aa_length) -> longest_isoforms
+#View(longest_isoforms)
+
+# rbind(ofav_annotations, longest_isoforms) -> ofav_annotations_longest_isoforms
+# nrow(ofav_annotations_longest_isoforms)
+# 
+# ofav_annotations_longest_isoforms %>%
+#   filter(Gene_ID %in% tx_t_ofav$Gene_ID) %>% nrow()
+```
+
+
+### TRNA Annotations
+
+```{bash tRNA from GFF}
+cat /Users/benyoung/Desktop/SCTLD_review/genome_files/ofav/GCF_002042975.1_ofav_dov_v1_genomic.gff | grep -v "#" | awk '$3=="tRNA"' | cut -f9 | tr -s ";" " " | awk '{print$1"\t"$2}' | sort | uniq | sed 's/ID=//g' | sed 's/Parent=//g' > /Users/benyoung/Desktop/SCTLD_review/gff_files/trna2gene_ofav.tsv
+```
+
+```{r}
+read.table(file = "/Users/benyoung/Desktop/SCTLD_review/gff_files/trna2gene_ofav.tsv") %>% 
+  mutate(Transcript_ID = V1, 
+         Gene_ID = V2) %>% 
+  dplyr::select(-V1, -V2) -> tx_t_ofav
+
+View(tx_t_ofav)
+tx_t_ofav$Gene_ID %>% unique() %>% length
+tx_t_ofav$Transcript_ID %>% unique() %>% length
+#View(tx_t_ofav)
+```
+
+```{r}
+read.delim(file = "/Users/benyoung/Desktop/SCTLD_review/genome_files/ofav/GCF_002042975.1_ofav_dov_v1_genomic.gff", 
+           comment.char = "#", 
+           sep = "\t", 
+           header = F) %>% 
+  dplyr::filter(V3 %in% c("tRNA")) %>% 
+  dplyr::select(V9) %>%
+  mutate(Gene_ID = str_extract(V9, pattern = "ID\\=.*\\;P"), 
+         Gene_ID = str_replace(Gene_ID, pattern = "\\;P", ""),
+         Gene_ID = str_replace(Gene_ID, pattern = "ID\\=rna\\-", ""), 
+         Gene.Annotation = str_extract(V9, pattern = "product\\=.*$"), 
+         Gene.Annotation = str_replace(Gene.Annotation, pattern = "product\\=", ""), 
+         Protein.Identifier = "na", 
+         sequence_m = "na", 
+         notes = "transfer_rnas") %>%
+  dplyr::select(-V9) -> trna_annot
+#View(trna_annot)
+```
+
+
+### lncRNA Annot File 
+
+```{bash tRNA from GFF}
+cat /Users/benyoung/Desktop/SCTLD_review/genome_files/ofav/GCF_002042975.1_ofav_dov_v1_genomic.gff | grep -v "#" | awk '$3=="lnc_RNA"' | cut -f9 | tr -s ";" " " | awk '{print$1"\t"$2}' | sort | uniq | sed 's/ID=//g' | sed 's/Parent=//g' > /Users/benyoung/Desktop/SCTLD_review/gff_files/lncRNA2gene_ofav.tsv
+```
+
+```{r}
+read.table(file = "/Users/benyoung/Desktop/SCTLD_review/gff_files/lncRNA2gene_ofav.tsv") %>% 
+  mutate(Transcript_ID = V1, 
+         Gene_ID = V2) %>% 
+  dplyr::select(-V1, -V2) -> tx_t_ofav
+
+tx_t_ofav$Gene_ID %>% unique() %>% length
+tx_t_ofav$Transcript_ID %>% unique() %>% length
+#View(tx_t_ofav)
+```
+
+So looks like transcript isoforms for the lncRNAs
+Transcripts = 2924
+Genes = 2431
+
+
+```{r}
+read.delim(file = "/Users/benyoung/Desktop/SCTLD_review/genome_files/ofav/GCF_002042975.1_ofav_dov_v1_genomic.gff", 
+           comment.char = "#", 
+           sep = "\t", 
+           header = F) %>% 
+  dplyr::filter(V3 %in% c("lnc_RNA")) %>% 
+  dplyr::select(V9) %>%
+  mutate(Gene_ID = str_extract(V9, pattern = "Parent\\=.*\\;D"),
+         Gene_ID = str_replace(Gene_ID, pattern = "\\;D", ""), 
+         Gene_ID = str_replace(Gene_ID, pattern = "Parent\\=gene\\-", ""), 
+         Gene.Annotation = str_extract(V9, pattern = "product\\=.*\\;t"),
+         Gene.Annotation = str_replace(Gene.Annotation, pattern = "\\;t", ""),  
+         Gene.Annotation = str_replace(Gene.Annotation, pattern = "product\\=", ""),
+         Protein.Identifier = "na", 
+         sequence_m = "na", 
+         notes = "long_non_coding_RNAs") %>%
+  dplyr::select(-V9) %>% 
+  distinct(Gene_ID, .keep_all = T) -> lncRNA_annot
+#View(lncRNA_annot)
+```
+
+
+### PseudoGenes
+
+```{bash tRNA from GFF}
+cat /Users/benyoung/Desktop/SCTLD_review/genome_files/ofav/GCF_002042975.1_ofav_dov_v1_genomic.gff | grep -v "#" | awk '$3=="pseudogene"' | cut -f9 | tr -s ";" " " | awk '{print$1"\t"$2}' | sort | uniq | sed 's/ID=//g' | sed 's/Parent=//g' > /Users/benyoung/Desktop/SCTLD_review/gff_files/psuedogene_ofav.tsv
+```
+
+```{r}
+read.table(file = "/Users/benyoung/Desktop/SCTLD_review/gff_files/psuedogene_ofav.tsv") %>% 
+  mutate(Transcript_ID = V1, 
+         Gene_ID = V2) %>% 
+  dplyr::select(-V1, -V2) -> tx_t_ofav
+
+tx_t_ofav$Gene_ID %>% unique() %>% length
+tx_t_ofav$Transcript_ID %>% unique() %>% length
+#View(tx_t_ofav)
+```
+
+```{r}
+read.delim(file = "/Users/benyoung/Desktop/SCTLD_review/genome_files/ofav/GCF_002042975.1_ofav_dov_v1_genomic.gff", 
+           comment.char = "#", 
+           sep = "\t", 
+           header = F) %>% 
+  dplyr::filter(V3 %in% c("pseudogene")) %>%
+  dplyr::select(V9) %>%
+  mutate(Gene_ID = str_extract(V9, pattern = "ID\\=.*\\;D"),
+         Gene_ID = str_replace(Gene_ID, pattern = "\\;D", ""),
+         Gene_ID = str_replace(Gene_ID, pattern = "ID\\=gene\\-", ""), 
+         Gene.Annotation = "pseudogene",
+         Protein.Identifier = "na", 
+         sequence_m = "na", 
+         notes = "pseudogenes") %>%
+  dplyr::select(-V9) -> pseudo_annot
+View(pseudo_annot)
+```
+
+yay have the 2431 genes for the lnc_RNAs. 
+
+
+### Bringing all together
+
+```{r}
+# View(ofav_annots)
+# View(lncRNA_annot)
+# View(trna_annot)
+rbind(ofav_annots, lncRNA_annot, trna_annot, pseudo_annot) %>% distinct(Gene_ID, .keep_all = T) -> ofav_annot_all
+```
+
+
+## EggNog Results Prep
+
+```{r}
+eggNOGcols <-
+  c(
+    "Query",
+    "seed_eggNOG_ortholog",
+    "seed_ortholog_evalue",
+    "seed_ortholog_score",
+    "best_tax_level",
+    "Preferred_name",
+    "GOs",
+    "EC",
+    "KEGG_ko",
+    "KEGG_Pathway",
+    "KEGG_Module",
+    "KEGG_Reaction",
+    "KEGG_rclass",
+    "BRITE",
+    "KEGG_TC",
+    "CAZy",
+    "BiGG_Reaction",
+    "annot lvl",
+    "matching OGs",
+    "Best OG",
+    "COG_cat",
+    "description"
+  )
+
+ofav_eggnog <- read.delim("~/Desktop/SCTLD_review/annotation_files/ofav/ofav_correct_annots.annotations", 
+                          comment.char  = "#", header = F,
+                          col.names = eggNOGcols)
+```
+
+```{r}
+ofav_eggnog %>% 
+  dplyr::rename(Protein.Identifier = "Query") %>% 
+  right_join(ofav_annot_all) -> ofav_annot_complete
+
+venn(list(ofav_eggnog$Query, ofav_annot_all$Protein.Identifier))
+```
+Venn makes sense
+Of the 25k mRNA genes, only 21 got annotations (middle part)
+Right unique (4451) is ones which did not get anything from eggnog (thus adding with center =25k mRNA and mito genes)
+Left section is the (5442) is the lncRNA, tRNA, pseudogenes and rRNA :) 
+
+
+## Ofav Count and metadata prep
+
+```{r Ofav Counts, include = F}
+read.delim("~/Desktop/SCTLD_review/counts/ofav_counts", row.names = 1, skip = 1) %>% 
+  select(-Chr, -Start, -End, -Strand, -Length) -> ofav_counts
+
+colnames(ofav_counts) <- gsub("X.scratch.projects.transcriptomics.mikeconnelly.projects.sctld_jamboree.tagseq.outputs.alignments.Ofav_na_", "", colnames(ofav_counts))
+colnames(ofav_counts) <- gsub("_na_Aligned.sortedByCoord.out.uniq.bam", "", colnames(ofav_counts))
+colnames(ofav_counts) <- gsub("_", "", colnames(ofav_counts))
+colnames(ofav_counts) <- gsub("na", "", colnames(ofav_counts))
+
+ofav_counts %>% rownames_to_column(var = "Gene_ID") %>% unique() %>% nrow()
+#View(ofav_counts)
+```
+
+```{r ofav metadat filtering}
+ofav_counts %>%
+           t() %>% 
+           as.data.frame() %>% 
+           rownames() -> ofav_samples
+
+all_meta %>%
+  filter(sample_name %in% ofav_samples) %>%
+  column_to_rownames(var = "sample_name") %>% 
+  filter(!Correct_treatment %in% c("healthy")) -> ofav_metadata
+
+nrow(ofav_metadata)
+ncol(ofav_counts)
+#View(ofav_metadata)
+```
+
+26 samples in count matrix and metadata file for ofav
+
+```{r filtering low count samples}
+ofav_counts %>%
+  t() %>%
+  as.data.frame() %>%
+  mutate(gene_counts = rowSums(ofav_counts %>%
+                                 t() %>%
+                                 as.data.frame)) %>%
+  rownames_to_column(var = "Sample_number") %>%
+  select(Sample_number, gene_counts) %>% 
+  arrange(gene_counts) %>%
+  filter(gene_counts < 300000) %>%
+  column_to_rownames(var = "Sample_number") %>%
+  rownames() -> lowcount_samps
+
+length(lowcount_samps)
+
+ofav_counts %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Samp") %>%
+  filter(!Samp %in% lowcount_samps) %>%
+  column_to_rownames(var = "Samp") %>% 
+  t() %>% 
+  as.matrix() -> ofav_counts
+
+ncol(ofav_counts)
+nrow(ofav_metadata)
+nrow(ofav_counts)
+#View(DHE_counts)
+```
+
+```{r Matching up counts to metadata ofav, include = T}
+matchup <- match(rownames(ofav_metadata), colnames(ofav_counts))
+ofav_counts <- ofav_counts[,matchup ]
+all(rownames(ofav_metadata) == colnames(ofav_counts))
+```
+
+```{r deseq model ofav}
+dds_ofav <-
+  DESeqDataSetFromMatrix(countData = ofav_counts,
+                         colData = ofav_metadata,
+                         design = ~ Experiment + Correct_treatment)
+```
+
+```{r Ofav Filtering, include = T}
+nrow(dds_ofav)
+ncol(dds_ofav)
+
+# cpm filtering step and seeing what original VS filtered gene number left is
+cccall <- counts(dds_ofav)
+keep <- rowSums(cpm(cccall)>=4) >= 5
+cccall <- cccall[keep, ]
+
+nrow(dds_ofav)
+ncol(dds_ofav)
+nrow(cccall)
+ncol(cccall)
+
+cccall %>%
+  as.data.frame()  -> cccall_ofav
+  
+dds_ofav <-
+  DESeqDataSetFromMatrix(
+    countData = cccall_ofav,
+    colData = ofav_metadata,
+    design = ~ Experiment + Correct_treatment
+  )
+```
+
+filtering =counts less than/equal to 5 in 4/fewer samples
+Original = 30175 genes
+Filtered = 18066
+
+## Ofav Saving Information For Analysis
+
+```{r}
+save(ofav_counts, file = "~/Desktop/SCTLD_review/analysis_files/ofav_counts_NOFILT.RData")
+save(cccall_ofav, file = "~/Desktop/SCTLD_review/analysis_files/ofav_counts_filt_4analysis.RData")
+save(ofav_annot_complete, file = "~/Desktop/SCTLD_review/analysis_files/ofav_annotations_complete_4analysis.RData")
+save(ofav_metadata, file = "~/Desktop/SCTLD_review/analysis_files/ofav_metadata_4analysis.RData")
+```
+
+
+---------------------
+
+
+# Montastrea Cavernosa
+
+```{bash generating tx to gene}
+cat /Users/benyoung/Desktop/SCTLD_review/gff_files/Mcavernosa.maker.coding.gff3 | grep -v "#" | awk '$3=="mRNA"' | cut -f9 | tr -s ";" " " | awk '{print$1"\t"$2}' | sort | uniq | sed 's/ID=//g' | sed 's/Parent=//g' > /Users/benyoung/Desktop/SCTLD_review/gff_files/tx2gene_mcav.tsv
+```
+
+```{r Mcav tx to gene checking}
+read.table(file = "/Users/benyoung/Desktop/SCTLD_review/gff_files/tx2gene_mcav.tsv") %>% 
+  mutate(Transcript_ID = V1, 
+         Gene_ID = V2) %>% 
+  dplyr::select(-V1, -V2) %>% 
+  mutate(Protein.Identifier = Transcript_ID)-> tx_t_mcav
+
+tx_t_mcav$Gene_ID %>% unique() %>% length
+tx_t_mcav$Transcript_ID %>% unique() %>% length
+#View(tx_t_mcav)
+```
+
+Mcav has no isoforms it seems in the genome build
+Transcript = gene (24739)
+
+```{r Mcav Protein annotations}
+read.csv("~/Desktop/SCTLD_review/annotation_files/mcav/mcav_annot_BEST.csv") %>%
+  mutate(Gene.Annotation = str_extract(sprot_Top_BLASTX_hit, pattern = "Full\\=.*\\: F")) %>%
+  mutate(Gene.Annotation = stri_extract_first_regex(Gene.Annotation, "^[^;]+")) %>%
+  mutate(Gene.Annotation = str_replace(Gene.Annotation, pattern = "Full\\=", ""), 
+         ADD = "-RA") %>% 
+  unite(prot_id, prot_id, ADD, sep = "") %>%
+  dplyr::select(gene_id, prot_id, Gene.Annotation) -> mcav_prot
+
+nrow(mcav_prot)
+venn(list(mcav_prot$gene_id, tx_t_mcav$Gene_ID))
+```
+
+The mcav protein has 25142 rows though . . . . . . . 
+Update
+-there are 403 which are unique to the protein file. 
+-There are no duplicates 
+- doesnt really matter as all count matrix genes are included in protein file so we will just filter and use that as we go on. 
+
+
+```{r MCAV counts, include = F}
+mcav_counts <- read.table("~/Desktop/SCTLD_review/counts/mcav_counts", header = T) %>%
+  column_to_rownames(var = "Geneid") %>% 
+  select(-Chr, -Start, -End, -Strand, -Length) -> mcav_counts 
+
+colnames(mcav_counts) <- gsub("Aligned.sortedByCoord.out.bam_unique.bam", "", colnames(mcav_counts))
+colnames(mcav_counts) <- gsub("Mcav_na_", "", colnames(mcav_counts))
+colnames(mcav_counts) <- gsub("_", "", colnames(mcav_counts))
+colnames(mcav_counts) <- gsub("na", "", colnames(mcav_counts))
+nrow(mcav_counts) #matches GFF3 yay
+ncol(mcav_counts)
+```
+
+```{r mcav Eggnog}
+eggNOGcols <-
+  c(
+    "Query",
+    "seed_eggNOG_ortholog",
+    "seed_ortholog_evalue",
+    "seed_ortholog_score",
+    "best_tax_level",
+    "Preferred_name",
+    "GOs",
+    "EC",
+    "KEGG_ko",
+    "KEGG_Pathway",
+    "KEGG_Module",
+    "KEGG_Reaction",
+    "KEGG_rclass",
+    "BRITE",
+    "KEGG_TC",
+    "CAZy",
+    "BiGG_Reaction",
+    "annot lvl",
+    "matching OGs",
+    "Best OG",
+    "COG_cat",
+    "description"
+  )
+
+mcav_eggnog <- read.delim("~/Desktop/SCTLD_review/annotation_files/mcav/mcav_correct_annotations.annotations", 
+                          comment.char  = "#", header = F,
+                          col.names = eggNOGcols)
+```
+
+```{r}
+mcav_eggnog %>% 
+  dplyr::rename(prot_id = "Query") %>% 
+  right_join(mcav_prot) -> mcav_annot_complete
+#View(mcav_annot_complete)
+
+venn(list(mcav_eggnog$Query, mcav_prot$prot_id))
+```
+
+This is correct 
+- eggnog only got 17717 matches, quick maths 17717 + 7425 = 25142
+
+This equals the protein file BUT NOT THE COUNT MATRIX THAT ONLY HAS 24740
+
+```{r}
+View(mcav_counts)
+View(mcav_annot_complete)
+venn(list(rownames(mcav_counts), mcav_annot_complete$gene_id))
+```
+
+There 1 unique in the count matrix and the 403 uique in the annot file (all numbers following on)
+
+```{r Filtering Annot Table with count matrix. }
+mcav_annot_complete %>% 
+  filter(gene_id %in% rownames(mcav_counts)) -> mcav_annot_complete
+```
+
+
+## Mcav Metadata Prep
+
+```{r ofav metadat filtering}
+mcav_counts %>%
+           t() %>% 
+           as.data.frame() %>% 
+           rownames() -> mcav_samples
+
+all_meta %>%
+  filter(sample_name %in% mcav_samples) %>% 
+  column_to_rownames(var = "sample_name") -> mcav_metadata
+
+nrow(mcav_metadata)
+ncol(mcav_counts)
+```
+
+17 samples in count matrix and metadata file for mcav
+
+```{r filtering low count samples}
+mcav_counts %>%
+  t() %>%
+  as.data.frame() %>%
+  mutate(gene_counts = rowSums(mcav_counts %>%
+                                 t() %>%
+                                 as.data.frame)) %>%
+  rownames_to_column(var = "Sample_number") %>%
+  select(Sample_number, gene_counts) %>% 
+  arrange(gene_counts) %>%
+  filter(gene_counts < 1000) %>%
+  column_to_rownames(var = "Sample_number") %>%
+  rownames() -> lowcount_samps
+
+length(lowcount_samps)
+
+mcav_counts %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "Samp") %>%
+  filter(!Samp %in% lowcount_samps) %>% 
+  column_to_rownames(var = "Samp") %>% 
+  t() %>%
+  as.matrix() -> mcav_counts
+
+View(mcav_counts)
+
+ncol(mcav_counts)
+nrow(mcav_metadata)
+nrow(mcav_counts)
+#View(DHE_counts)
+```
+
+17 samples (meta and count match) 
+24740 genes (mataches annot file)
+
+```{r Matching up counts to metadata ofav, include = T}
+matchup <- match(rownames(mcav_metadata), colnames(mcav_counts))
+mcav_counts <- mcav_counts[,matchup ]
+all(rownames(mcav_metadata) == colnames(mcav_counts))
+```
+
+```{r deseq model ofav}
+dds_mcav <-
+  DESeqDataSetFromMatrix(countData = mcav_counts,
+                         colData = mcav_metadata,
+                         design = ~ Project + Correct_treatment)
+```
+
+```{r Ofav Filtering, include = T}
+nrow(dds_mcav)
+ncol(dds_mcav)
+
+# cpm filtering step and seeing what original VS filtered gene number left is
+cccall <- counts(dds_mcav)
+keep <- rowSums(cpm(cccall)>=2) >= 3
+cccall <- cccall[keep, ]
+
+nrow(dds_mcav)
+ncol(dds_mcav)
+nrow(cccall)
+ncol(cccall)
+
+cccall %>%
+  as.data.frame()  -> cccall_mcav
+  
+dds_mcav <-
+  DESeqDataSetFromMatrix(
+    countData = cccall_mcav,
+    colData = mcav_metadata,
+    design = ~ Project + Correct_treatment
+  )
+```
+
+filtering =counts less than/equal to 3 in 2/fewer samples
+Original = 24740 genes
+Filtered = 13816 genes
+
+```{r}
+nrow(mcav_counts)
+nrow(cccall_mcav)
+```
+
+
+## Mcav Saving Information For Analysis
+
+```{r}
+save(mcav_counts, file = "~/Desktop/SCTLD_review/analysis_files/mcav_counts_NOFILT.RData")
+save(cccall_mcav, file = "~/Desktop/SCTLD_review/analysis_files/mcav_counts_filt_4analysis.RData")
+save(mcav_annot_complete, file = "~/Desktop/SCTLD_review/analysis_files/mcav_annotations_complete_4analysis.RData")
+save(mcav_metadata, file = "~/Desktop/SCTLD_review/analysis_files/mcav_metadata_4analysis.RData")
+```
+
+

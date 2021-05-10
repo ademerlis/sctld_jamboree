@@ -1,0 +1,177 @@
+---
+title: "SCTLD_BiNGO_Analysis_May2021"
+author: "Melissa Drown"
+date: "5/4/2021"
+output: html_document
+---
+```{r Library Loading, include = F}
+library(tidyverse)
+library(DESeq2)
+library(ggrepel)
+library(ComplexHeatmap)
+library(pheatmap)
+library(genefilter)
+library(WGCNA)
+library(flashClust)
+library(edgeR) #counts per million
+library(venn)
+```
+
+This analysis uses previously generated files from differential expression analysis to make a list of annotated protein identifiers matched to GO terms for GO Enrichment analysis in Cytoscape BiNGO. After running the BiNGO analysis, results tables are used for data visualization.
+
+## Set up Files for Gene Ontology Analysis
+```{r custom annot file for bingo and cytoscape}
+# Ofav reference list for BiNGO Enrichment Analysis
+ofav_annot_complete$GOs <- as.character(ofav_annot_complete$GOs)
+
+ofav_annot_complete %>% dplyr::select(Protein.Identifier, GOs) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(GOs, sep = ",") %>%
+  mutate(GOs = str_remove(GOs, "GO:")) %>% 
+  unite(x, c(Protein.Identifier, GOs), sep = " = ", remove = TRUE) -> caf_go
+
+View(caf_go)
+
+#write.table(caf_go,
+ #           file = "~/Desktop/cyto_ofav_input.txt",
+  #          quote=FALSE, 
+   #         row.names=FALSE, 
+    #        col.names=FALSE)
+```
+
+```{r}
+# Ofav list of FDR significant for BiNGO Enrichment Analysis
+ofav_annot_DEG %>% 
+  filter(padj < 0.05) %>%
+  dplyr::select(Protein.Identifier) %>% 
+  drop_na() %>% 
+  distinct(Protein.Identifier) %>%
+  column_to_rownames(var = "Protein.Identifier") %>% 
+  row.names(.) -> ofav_BH
+
+ofav_BH
+length(ofav_BH) # 2005 -- 32 don't have protein_ID annotations and 157 duplicate protein_IDs
+
+#write.table(
+ # ofav_BH,
+#  file = "~/Desktop/ofav_BH.txt",
+ # sep = "\t",
+  #quote = FALSE,
+  #row.names = FALSE,
+  #col.names = FALSE
+#)
+```
+
+Same setup for Mcav
+```{r custom annot file for bingo and cytoscape}
+# Mcav Reference list for BiNGO Enrichment Analysis
+mcav_annot_complete$GOs <- as.character(mcav_annot_complete$GOs)
+
+mcav_annot_complete %>% dplyr::select(prot_id, GOs) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(GOs, sep = ",") %>%
+  mutate(GOs = str_remove(GOs, "GO:")) %>% 
+  unite(x, c(prot_id, GOs), sep = " = ", remove = TRUE) -> maf_go
+
+View(maf_go)
+
+#write.table(maf_go,
+ #           file = "~/Desktop/cyto_mcav_input.txt",
+  #          quote=FALSE, 
+   #         row.names=FALSE, 
+    #        col.names=FALSE)
+```
+
+```{r}
+# Mcav list of FDR significant for BiNGO Enrichment Analysis
+mcav_annot_DEG %>% 
+  filter(padj < 0.05) %>%
+  dplyr::select(prot_id) %>% 
+  drop_na() %>% 
+  distinct(prot_id) %>%
+  column_to_rownames(var = "prot_id") %>% 
+  row.names(.) -> mcav_BH
+
+mcav_BH
+length(mcav_BH) # 582
+
+
+#write.table(
+#  mcav_BH,
+#  file = "~/Desktop/mcav_BH.txt",
+#  sep = "\t",
+#  quote = FALSE,
+#  row.names = FALSE,
+#  col.names = FALSE
+#)
+```
+
+Visualizing the GO results
+```{r go viz}
+ofav_go_bp <- read.csv("~/Desktop/ofav_BiNGO_signifGO_BP.csv")
+
+ofav_go_cc <- read.csv("~/Desktop/ofav_BiNGO_signifGO_CC.csv")
+
+# Biological Process Ofav BiNGO Results
+ofav_go_bp$GO_description <- as.character(ofav_go_bp$GO_description)
+ofav_go_bp$genes <- as.character(ofav_go_bp$genes)
+ofav_go_bp$GO_ID <- as.factor(ofav_go_bp$GO_ID)
+ofav_go_bp$protein_product <- as.character(ofav_go_bp$genes)
+
+# Molecular Function Ofav BiNGO Results
+ofav_go_cc$GO_description <- as.character(ofav_go_cc$GO_description)
+ofav_go_cc$genes <- as.character(ofav_go_cc$genes)
+ofav_go_cc$GO_ID <- as.factor(ofav_go_cc$GO_ID)
+ofav_go_cc$protein_product <- as.character(ofav_go_cc$genes)
+```
+
+```{r}
+#Function for Formatting Bingo Heatmaps
+pad27 <- function(x){
+  str_x = as.character(x)
+  digits = nchar(str_x)
+  toAdd = 7-digits
+  name = paste0('GO:',
+                strrep(0,toAdd), 
+                x)
+  name
+}
+
+ofav_annot_DEG$protein_product <- ofav_annot_DEG$Protein.Identifier
+
+# seperate list of protein_products associated with each GO (one protein product per line, for merging with DEG list)
+ofav_go_bp %>% 
+  separate_rows(protein_product, sep = '\\ ', convert = TRUE) %>%
+   mutate(GO.ID_FULL = pad27(GO_ID)) %>%
+  inner_join(ofav_annot_DEG, by="protein_product") -> ofav_BP
+
+
+ofav_go_cc %>% 
+  separate_rows(protein_product, sep = '\\ |', convert = TRUE) %>% 
+  mutate(GO.ID_FULL = pad27(GO_ID)) %>%
+  inner_join(ofav_annot_DEG, by="protein_product") -> ofav_CC
+```
+
+```{r}
+# plot p-value and number of genes per GO term for Ofav BP and CC list
+# no significant GO terms for Mcav for any category so there is nothing to plot
+#library(scales)
+#library(viridis)
+
+ggplot(data=ofav_go_bp, aes(x=-log(padj), y=reorder(GO_description, -padj))) +
+    geom_point(aes(size=number_genes, color=-log(padj))) +
+    scale_color_viridis(option="plasma") +
+  labs(x="-log FDR Adjusted P-Value", y="Gene Ontology Term Description", title=paste("Ofav Significant Biological Process GO")) +
+  scale_y_discrete(labels = wrap_format(40)) +
+  theme_bw()
+
+ggplot(data=ofav_go_cc, aes(x=-log(padj), y=reorder(GO_description, -padj))) +
+    geom_point(aes(size=number_genes, color=-log(padj))) +
+    scale_color_viridis(option="plasma") +
+  labs(x="-log FDR Adjusted P-Value", y="Gene Ontology Term Description", title=paste("Ofav Significant Cellular Component GO")) +
+  scale_y_discrete(labels = wrap_format(40)) +
+  theme_bw()
+
+```
